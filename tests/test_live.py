@@ -27,6 +27,7 @@ async def test_installed_server(tmp_path):
             "list_snapshots",
             "find_courses",
             "list_pages",
+            "search_course_content",
             "read_page",
             "get_attachment",
             "auth_status",

@@ -57,6 +57,19 @@ class Pages(TypedDict):
     next_cursor: int | None
 
 
+class ContentMatch(TypedDict):
+    title: str
+    url: str
+    snippet: str
+
+
+class ContentMatches(TypedDict):
+    source: str
+    complete: bool
+    results: list[ContentMatch]
+    next_cursor: int | None
+
+
 class Page(TypedDict):
     title: str
     source: str
@@ -134,6 +147,13 @@ def create_server(config):
     ) -> Pages:
         """Discover pages and search titles within a course site. Follow next_cursor for more rows."""
         return await materials.pages(code, snapshot, query, cursor, ctx)
+
+    @server.tool()
+    async def search_course_content(
+        code: str, query: str, ctx: Context, snapshot: str = "all", cursor: int = 0
+    ) -> ContentMatches:
+        """Search HTML teaching material within one course. Follow next_cursor for more matches. A partial crawl may miss matches."""
+        return await materials.search_content(code, snapshot, query, cursor, ctx)
 
     @server.tool()
     async def read_page(

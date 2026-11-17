@@ -51,11 +51,12 @@ Try **“Find BI-ML1.21 and show me its lecture pages”** or **“Find BI-3DT.1
 | `list_snapshots` | See published semester choices. `complete: false` indicates that browser-based semester discovery was unavailable. |
 | `find_courses` | Search by code or Czech/English name. Use `active`, `language`, `snapshot` and `next_cursor` to filter and paginate. |
 | `list_pages` | Supply an exact course code and optional title query. Results include breadcrumbs. `complete: false` indicates a bounded or interrupted crawl. |
+| `search_course_content` | Search for a word or phrase inside one course's HTML pages. Results include matching snippets and source URLs. Follow `next_cursor` for more matches. |
 | `read_page` | Start with the course code, then follow a returned page URL in the same session and snapshot. Supply a heading or text offset for long pages. |
 | `get_attachment` | Supply the course code and a discovered attachment URL. For a PDF, request an inclusive one-based page range. Continue a partial page with both `next_page` and `next_offset`. |
 | `auth_status` | Inspect configured mode, last authentication outcome and renewal permission. `untested` is normal until a protected read. |
 
-External sites are returned as links. PDF text extraction uses a bounded worker and reports image-only pages. Page search reads titles within one course. Protected access follows the permissions of your FIT account.
+External sites are returned as links. PDF text extraction uses a bounded worker and reports image-only pages. Course content search scans up to 100 HTML pages with a 20-second crawl budget after loading the homepage. If `complete` is false, the result covers only the pages the crawl could read. To sign in for a protected subpage, open it directly with `read_page` and retry the search.
 
 ## Development
 

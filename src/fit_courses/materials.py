@@ -34,6 +34,22 @@ def batch(rows, cursor, limit):
     }
 
 
+def matching_snippet(main, needle):
+    text = " ".join(main.get_text(" ", strip=True).split())
+    match = fold(text).find(needle)
+    if match < 0:
+        return None
+    # Case folding can expand characters, so locate the match in the original text.
+    position = 0
+    for index, char in enumerate(text):
+        position += len(fold(char))
+        if position > match:
+            break
+    start = max(0, index - 80)
+    end = min(len(text), index + 240)
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
 def link_kind(url, root):
     if not within(url, root):
         return "link"
@@ -50,8 +66,18 @@ def parse(doc, root):
         "script, style, svg, .hidden, [hidden], .anchor, .nav-link, .display-menu"
     ):
         node.decompose()
-    nav = soup.select_one("nav#nav, nav.site-nav")
-    main = soup.select_one("main, article") or soup.body or soup
+    nav = (
+        soup.select_one("nav#nav, nav.site-nav, nav.md-nav--primary")
+        or soup.select_one("#sidebar, .sidebar")
+        or soup.select_one("nav")
+    )
+    main = (
+        soup.select_one("article.md-content__inner")
+        or soup.select_one("main")
+        or soup.select_one("article, #content, .main-content")
+        or soup.body
+        or soup
+    )
 
     def links(parent, navigation=False):
         result = {}
@@ -92,6 +118,8 @@ def parse(doc, root):
         return list(result.values())
 
     navigation = links(nav, True) if nav else []
+    if nav and main in nav.parents:
+        nav.decompose()
     for node in main.select("nav, header.site-header, footer.site-footer"):
         node.decompose()
     body_links = links(main)
@@ -220,8 +248,8 @@ class Materials:
             )
         return home
 
-    async def load(self, root, url, ctx):
-        doc = await self.portal.fetch(url, root, ctx)
+    async def load(self, root, url, ctx, *, allow_sign_in=True):
+        doc = await self.portal.fetch(url, root, ctx, allow_sign_in=allow_sign_in)
         title, nav, links, main = parse(doc, root)
         self.sync_identity()
         refs = self.refs.setdefault(root, {})
@@ -231,52 +259,100 @@ class Materials:
                 refs[urldefrag(row["url"]).url] = row["kind"]
         return title, nav, links, main, doc.url
 
+    async def crawl(self, root, first_page, ctx, *, seconds, needle=None):
+        title, nav, links, main, source = first_page
+        rows = {
+            source: {
+                "url": source,
+                "title": title,
+                "breadcrumb": [title],
+                "kind": "page",
+            }
+        }
+        queue = deque()
+        discovered = {root, source}
+        fetched = {source}
+        matches = []
+
+        def enqueue(links, parents):
+            for link in links:
+                url = urldefrag(link["url"]).url
+                if link["kind"] == "page" and url not in discovered:
+                    discovered.add(url)
+                    rows[url] = dict(
+                        link,
+                        url=url,
+                        breadcrumb=link.get("breadcrumb") or [*parents, link["title"]],
+                    )
+                    queue.append(url)
+
+        def match(title, main, source):
+            if needle is not None and (snippet := matching_snippet(main, needle)):
+                matches.append({"title": title, "url": source, "snippet": snippet})
+
+        deadline = time.monotonic() + seconds
+        match(title, main, source)
+        enqueue(nav, [])
+        enqueue(links, [title])
+        partial = False
+        attempts = 1
+        while queue and attempts < 100 and time.monotonic() < deadline:
+            url = queue.popleft()
+            if url in fetched:
+                continue
+            attempts += 1
+            try:
+                async with asyncio.timeout(max(0.01, deadline - time.monotonic())):
+                    title, nav, links, main, source = await self.load(
+                        root, url, ctx, allow_sign_in=False
+                    )
+            except TimeoutError:
+                partial = True
+                break
+            except CoursesError as error:
+                partial = True
+                if str(error).startswith("RATE_LIMITED:"):
+                    break
+                continue
+            if source in fetched:
+                rows.pop(url)
+                continue
+            fetched.add(source)
+            discovered.add(source)
+            row = rows[url]
+            if url != source:
+                rows.pop(url)
+                rows[source] = dict(row, url=source)
+            match(title, main, source)
+            enqueue(nav, [])
+            enqueue(links, row["breadcrumb"])
+
+        return list(rows.values()), matches, not (partial or queue)
+
     async def pages(self, code, snapshot, query, cursor, ctx):
         root = await self.home(snapshot, code)
-        title, nav, links, _, _ = await self.load(root, root, ctx)
+        first_page = await self.load(root, root, ctx)
         cache = self.indexes.get(root)
         if not cache or time.monotonic() >= cache[0]:
-            rows = {
-                root: {
-                    "url": root,
-                    "title": title,
-                    "breadcrumb": [title],
-                    "kind": "page",
-                }
-            }
-            queue = deque()
-            visited = {root}
-
-            def add(rows_to_add, parents):
-                for r in rows_to_add:
-                    url = urldefrag(r["url"]).url
-                    if r["kind"] == "page" and url not in rows:
-                        rows[url] = dict(
-                            r,
-                            url=url,
-                            breadcrumb=r.get("breadcrumb") or [*parents, r["title"]],
-                        )
-                        queue.append(url)
-
-            add(nav, [])
-            add(links, [title])
-            deadline = time.monotonic() + 8
-            partial = False
-            while queue and len(visited) < 100 and time.monotonic() < deadline:
-                url = queue.popleft()
-                visited.add(url)
-                try:
-                    async with asyncio.timeout(max(0.01, deadline - time.monotonic())):
-                        _, nested, related, _, _ = await self.load(root, url, ctx)
-                except (TimeoutError, CoursesError):
-                    partial = True
-                    break
-                add(nested, [])
-                add(related, rows[url]["breadcrumb"])
-            cache = time.monotonic() + 120, list(rows.values()), not (partial or queue)
+            rows, _, complete = await self.crawl(root, first_page, ctx, seconds=8)
+            cache = time.monotonic() + 120, rows, complete
             self.indexes[root] = cache
-        matches = [r for r in cache[1] if fold(query) in fold(r["title"])]
+        needle = fold(query)
+        matches = [row for row in cache[1] if needle in fold(row["title"])]
         return {"source": root, "complete": cache[2], **batch(matches, cursor, 50)}
+
+    async def search_content(self, code, snapshot, query, cursor, ctx):
+        needle = fold(" ".join(query.split()))
+        if not needle:
+            raise CoursesError(
+                "INVALID_QUERY: Supply a keyword or phrase to search for."
+            )
+        root = await self.home(snapshot, code)
+        first_page = await self.load(root, root, ctx)
+        _, matches, complete = await self.crawl(
+            root, first_page, ctx, seconds=20, needle=needle
+        )
+        return {"source": root, "complete": complete, **batch(matches, cursor, 20)}
 
     async def reference(self, snapshot, code, url, kind):
         root = await self.home(snapshot, code)
@@ -286,7 +362,7 @@ class Materials:
             and self.refs.get(root, {}).get(target) != kind
         ):
             raise CoursesError(
-                "UNKNOWN_REFERENCE: First discover this URL with list_pages or read_page in this session."
+                "UNKNOWN_REFERENCE: First discover this URL with a course search, list_pages or read_page in this session."
             )
         return root, target
 

@@ -151,7 +151,16 @@ class Portal:
                     await response.aclose()
             raise CoursesError("UPSTREAM_ERROR: Too many redirects.")
 
-    async def fetch(self, url, root, ctx=None, method="GET", limit=4 * 1024**2):
+    async def fetch(
+        self,
+        url,
+        root,
+        ctx=None,
+        method="GET",
+        limit=4 * 1024**2,
+        *,
+        allow_sign_in=True,
+    ):
         try:
             try:
                 return await self._fetch(url, root, None, method, limit)
@@ -167,6 +176,8 @@ class Portal:
                     return doc
                 except LoginNeeded:
                     pass
+            if not allow_sign_in:
+                raise CoursesError("AUTH_REQUIRED: Open this page directly to sign in.")
             await self.auth.sign_in(ctx, generation)
             try:
                 doc = await self._fetch(url, root, self.auth.token, method, limit)

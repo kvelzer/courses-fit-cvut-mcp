@@ -206,3 +206,64 @@ async def test_heading_and_page_continuation():
     )
     assert first["source"] == doc.url and first["text"].startswith("## Week 1")
     assert second["next_offset"] is None and second["text"].rstrip().endswith("a")
+
+
+@pytest.mark.asyncio
+async def test_course_search_finds_page_text_after_inaccessible_links(monkeypatch):
+    auth = Authentication({"COURSES_OAUTH_ACCESS_TOKEN": "fixture"})
+    portal = Portal(auth)
+    await portal.client.aclose()
+    sign_in = AsyncMock()
+    monkeypatch.setattr(auth, "sign_in", sign_in)
+    calls = []
+
+    def respond(request):
+        calls.append(str(request.url))
+        path = request.url.path
+        if path.endswith("/old.html"):
+            return httpx.Response(404)
+        if path.endswith("/restricted.html"):
+            return httpx.Response(303, headers={"Location": IDP + "/login.html"})
+        if path.endswith("/week/"):
+            return httpx.Response(302, headers={"Location": "index.html"})
+        if path.endswith("/week/index.html"):
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text="<main><h1>Week 1</h1><p>Počítačová grafika</p></main>",
+            )
+        assert str(request.url) == ROOT
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            text="""<header><nav><a href="other/">Other</a></nav></header>
+            <div id="sidebar"><a href="old.html">Old</a>
+            <a href="restricted.html">Restricted</a>
+            <a href="week/">Week 1</a><a href="week/index.html">Week 1</a></div>
+            <div id="content"><h1>Overview</h1><a href="https://example.org/">External</a></div>""",
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        portal.client = client
+        site = Materials(portal)
+        site.home = AsyncMock(return_value=ROOT)
+        result = await site.search_content(
+            "BI-DEMO", "B232", "  pocitacova  grafika ", 0, context()
+        )
+        assert result["complete"] is False
+        assert result["results"] == [
+            {
+                "title": "Week 1",
+                "url": ROOT + "week/index.html",
+                "snippet": "Week 1 Počítačová grafika",
+            }
+        ]
+        sign_in.assert_not_awaited()
+        assert calls.count(ROOT + "week/index.html") == 1
+        assert ROOT + "other/" not in calls
+        page = await site.read(
+            "BI-DEMO", "B232", result["results"][0]["url"], "", 0, context()
+        )
+        assert "Počítačová grafika" in page["text"]
+        with pytest.raises(CoursesError, match="INVALID_QUERY"):
+            await site.search_content("BI-DEMO", "B232", " ", 0, context())
